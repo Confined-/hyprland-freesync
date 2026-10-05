@@ -1,0 +1,218 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH 3/3] drm, amdgpu: add the "FreeSync HDR Mode" connector property
+
+This property allows userspace to make the driver signal the display that it
+should switch to FreeSync 2 HDR mode, which uses the native primaries and a
+gamma 2.2 transfer function, instead of BT2020 + PQ in the more common HDR
+mode.
+
+Rebased onto v7.3-rc6: amdgpu hunks relocated to amdgpu_dm_freesync.c,
+amdgpu_dm_connector.c and amdgpu_dm.h after the amdgpu_dm split-up;
+core hunks adjusted for the new color_format property and the
+hdr_output_metadata attach helper returning void.
+---
+
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+index 1b42c4606..aa08671d4 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -5048,6 +5048,7 @@ static void amdgpu_dm_atomic_commit_tail(struct drm_atomic_commit *state)
+ 		struct dm_connector_state *dm_new_con_state = to_dm_connector_state(new_con_state);
+ 		struct dm_connector_state *dm_old_con_state = to_dm_connector_state(old_con_state);
+ 		struct amdgpu_crtc *acrtc = to_amdgpu_crtc(dm_new_con_state->base.crtc);
++		struct amdgpu_dm_connector *aconnector = to_amdgpu_dm_connector(connector);
+ 		struct dc_surface_update *dummy_updates;
+ 		struct dc_stream_update stream_update;
+ 		struct dc_info_packet hdr_packet;
+@@ -5061,6 +5062,8 @@ static void amdgpu_dm_atomic_commit_tail(struct drm_atomic_commit *state)
+ 			old_crtc_state = drm_atomic_get_old_crtc_state(state, &acrtc->base);
+ 		}
+ 
++		aconnector->freesync_hdr_mode = dm_new_con_state->base.freesync_hdr_mode;
++
+ 		/* Skip any modesets/resets */
+ 		if (!acrtc || drm_atomic_crtc_needs_modeset(new_crtc_state))
+ 			continue;
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
+index 881c8d1c3..0591b28f0 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
+@@ -893,6 +893,7 @@ struct amdgpu_dm_connector {
+ 	bool pack_sdp_v1_3;
+ 	enum adaptive_sync_type as_type;
+ 	struct amdgpu_hdmi_vsdb_info vsdb_info;
++	enum freesync_hdr_mode freesync_hdr_mode;
+ 
+ 	/* HDMI HPD debounce support */
+ 	unsigned int hdmi_hpd_debounce_delay_ms;
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_connector.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_connector.c
+index d386bb147..279fb8c63 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_connector.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_connector.c
+@@ -3320,6 +3320,10 @@ void amdgpu_dm_connector_init_helper(struct amdgpu_display_manager *dm,
+ 			drm_connector_attach_content_protection_property(&aconnector->base, true);
+ 	}
+ 
++	if (connector_type == DRM_MODE_CONNECTOR_DisplayPort) {
++		drm_connector_attach_freesync_hdr_property(&aconnector->base);
++	}
++
+ 	if (connector_type == DRM_MODE_CONNECTOR_eDP) {
+ 		struct drm_privacy_screen *privacy_screen;
+ 
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_freesync.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_freesync.c
+index 7e484adb4..11904bf87 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_freesync.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_freesync.c
+@@ -169,6 +169,7 @@ void amdgpu_dm_update_freesync_state_on_stream(
+ 	bool pack_sdp_v1_3 = false;
+ 	struct amdgpu_dm_connector *aconn;
+ 	enum vrr_packet_type packet_type = PACKET_TYPE_VRR;
++	enum color_transfer_func tf = TRANSFER_FUNC_UNKNOWN;
+ 
+ 	if (!new_stream)
+ 		return;
+@@ -225,7 +234,7 @@ void amdgpu_dm_update_freesync_state_on_stream(
+ 		new_stream,
+ 		&vrr_params,
+ 		packet_type,
+-		TRANSFER_FUNC_UNKNOWN,
++		tf,
+ 		&vrr_infopacket,
+ 		pack_sdp_v1_3);
+ 
+diff --git a/drivers/gpu/drm/drm_atomic_uapi.c b/drivers/gpu/drm/drm_atomic_uapi.c
+index 68d59e17f..a9cf304f8 100644
+--- a/drivers/gpu/drm/drm_atomic_uapi.c
++++ b/drivers/gpu/drm/drm_atomic_uapi.c
+@@ -962,6 +962,8 @@ static int drm_atomic_connector_set_property(struct drm_connector *connector,
+ 		state->hdmi.broadcast_rgb = val;
+ 	} else if (property == connector->color_format_property) {
+ 		state->color_format = val;
++	} else if (property == connector->freesync_hdr_property) {
++		state->freesync_hdr_mode = val;
+ 	} else if (connector->funcs->atomic_set_property) {
+ 		return connector->funcs->atomic_set_property(connector,
+ 				state, property, val);
+@@ -1049,6 +1051,8 @@ drm_atomic_connector_get_property(struct drm_connector *connector,
+ 		*val = state->hdmi.broadcast_rgb;
+ 	} else if (property == connector->color_format_property) {
+ 		*val = state->color_format;
++	} else if (property == connector->freesync_hdr_property) {
++		*val = state->freesync_hdr_mode;
+ 	} else if (connector->funcs->atomic_get_property) {
+ 		return connector->funcs->atomic_get_property(connector,
+ 				state, property, val);
+diff --git a/drivers/gpu/drm/drm_connector.c b/drivers/gpu/drm/drm_connector.c
+index 8b4baed06..b984647a0 100644
+--- a/drivers/gpu/drm/drm_connector.c
++++ b/drivers/gpu/drm/drm_connector.c
+@@ -1842,6 +1842,15 @@ EXPORT_SYMBOL(drm_hdmi_connector_get_output_format_name);
+  *
+  *	Drivers can set up these properties by calling
+  *	drm_mode_create_tv_margin_properties().
++ *
++ * FreeSync HDR Mode:
++ *	This optional property allows userspace to signal the display to switch
++ *	into FreeSync 2 HDR mode, which assumes a colorspace with native
++ *	primaries and a gamma 2.2 transfer function with min and max luminance
++ *	matching the display.
++ *	Like with HDR_OUTPUT_METADATA, it is up to userspace to find out which
++ *	mode the display supports, and which primaries and luminance levels it
++ *	has to use.
+  */
+ 
+ int drm_connector_create_standard_properties(struct drm_device *dev)
+@@ -3133,6 +3142,42 @@ bool drm_connector_atomic_hdr_metadata_equal(struct drm_connector_state *old_sta
+ }
+ EXPORT_SYMBOL(drm_connector_atomic_hdr_metadata_equal);
+ 
++static const struct drm_prop_enum_list freesync_hdr_mode_names[] = {
++	{ FREESYNC_HDR_DISABLED, "Disabled" },
++	{ FREESYNC_2_HDR_NATIVE, "FreeSync 2 Native" },
++};
++
++/**
++ * drm_connector_attach_freesync_hdr_property - attach "FreeSync HDR Mode" property
++ * @connector: connector to attach the property on.
++ *
++ * This is used to allow the userspace to enable or disable FreeSync HDR.
++ *
++ * Returns:
++ * Zero on success, negative errno on failure.
++ */
++int drm_connector_attach_freesync_hdr_property(struct drm_connector *connector)
++{
++	struct drm_device *dev = connector->dev;
++	struct drm_property *prop = connector->freesync_hdr_property;
++	if (!prop) {
++		prop = drm_property_create_enum(dev, DRM_MODE_PROP_ENUM,
++					"FreeSync HDR Mode",
++					freesync_hdr_mode_names,
++					ARRAY_SIZE(freesync_hdr_mode_names));
++		if (!prop)
++			return -EINVAL;
++
++		connector->freesync_hdr_property = prop;
++	}
++
++	drm_object_attach_property(&connector->base, prop,
++			   FREESYNC_HDR_DISABLED);
++
++	return 0;
++}
++EXPORT_SYMBOL(drm_connector_attach_freesync_hdr_property);
++
+ /**
+  * drm_connector_set_vrr_capable_property - sets the variable refresh rate
+  * capable property for a connector
+diff --git a/include/drm/drm_connector.h b/include/drm/drm_connector.h
+index a0cf0268d..5fac6cf40 100644
+--- a/include/drm/drm_connector.h
++++ b/include/drm/drm_connector.h
+@@ -460,6 +460,11 @@ enum drm_privacy_screen_status {
+ 	PRIVACY_SCREEN_ENABLED_LOCKED,
+ };
+ 
++enum freesync_hdr_mode {
++    FREESYNC_HDR_DISABLED = 0,
++    FREESYNC_2_HDR_NATIVE = 1,
++};
++
+ /**
+  * enum drm_colorspace - color space
+  *
+@@ -1290,6 +1295,12 @@ struct drm_connector_state {
+ 	 * @drm_atomic_helper_connector_hdmi_check().
+ 	 */
+ 	struct drm_connector_hdmi_state hdmi;
++
++	/**
++	 * @freesync_hdr_mode: Connector property to enable
++	 * or disable FreeSync HDR
++	 */
++	enum freesync_hdr_mode freesync_hdr_mode;
+ };
+ 
+ struct drm_connector_hdmi_audio_funcs {
+@@ -2321,6 +2332,12 @@ struct drm_connector {
+ 	 */
+ 	struct drm_property *broadcast_rgb_property;
+ 
++	/**
++	 * @freesync_hdr_property: Connector property to enable
++	 * or disable FreeSync HDR
++	 */
++	struct drm_property *freesync_hdr_property;
++
+ #define DRM_CONNECTOR_POLL_HPD (1 << 0)
+ #define DRM_CONNECTOR_POLL_CONNECT (1 << 1)
+ #define DRM_CONNECTOR_POLL_DISCONNECT (1 << 2)
+@@ -2677,6 +2694,7 @@ int drm_connector_attach_colorspace_property(struct drm_connector *connector);
+ void drm_connector_attach_hdr_output_metadata_property(struct drm_connector *connector);
+ bool drm_connector_atomic_hdr_metadata_equal(struct drm_connector_state *old_state,
+ 					     struct drm_connector_state *new_state);
++int drm_connector_attach_freesync_hdr_property(struct drm_connector *connector);
+ int drm_mode_create_aspect_ratio_property(struct drm_device *dev);
+ int drm_mode_create_hdmi_colorspace_property(struct drm_connector *connector,
+ 					     u32 supported_colorspaces);

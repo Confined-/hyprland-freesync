@@ -16,6 +16,32 @@ of BT2020 + PQ, when HDR is active on a capable display.
 
 Build order: kernel → aquamarine → hyprland.
 
+## Arch packages (`pkgbuilds/`)
+
+Pre-written PKGBUILDs so you can `makepkg -s` instead of hand-rolling:
+
+- `pkgbuilds/linux-freesync-hdr/` → `linux-freesync-hdr` + `linux-freesync-hdr-headers`.
+  Builds the `v7.3-rc6` tarball with the 3 patches. Reuses your running
+  kernel's `/proc/config.gz` when present (plus forced `DRM_AMDGPU`), else
+  `defconfig`. Coexists with stock `linux` — pick it in your bootloader to test.
+  Run `updpkgsums` in the dir first if you want the tarball hash pinned.
+- `pkgbuilds/aquamarine-freesync/` → `aquamarine-freesync` (provides/conflicts
+  `aquamarine`). Pinned to aquamarine `52ea11f`. Install before Hyprland.
+- `pkgbuilds/hyprland-freesync/` → `hyprland-freesync` (provides/conflicts
+  `hyprland`). Pinned to Hyprland `19fb395`, needs `aquamarine-freesync`
+  at build time. Toggle at runtime with `render:freesync_hdr = 0/1` (default 1).
+
+```sh
+cd pkgbuilds/linux-freesync-hdr && makepkg -s   # then install both packages
+sudo pacman -U linux-freesync-hdr-*.pkg.tar.zst linux-freesync-hdr-headers-*.pkg.tar.zst
+# reboot into it, verify with drm_info, then:
+cd ../aquamarine-freesync && makepkg -s && sudo pacman -U aquamarine-freesync-*.pkg.tar.zst
+cd ../hyprland-freesync && makepkg -s && sudo pacman -U hyprland-freesync-*.pkg.tar.zst
+```
+
+Untested builds (written without a compiler/makepkg on hand) — if `makepkg -s`
+complains about a dependency name or a build step, paste the error and it gets fixed.
+
 ## Behavior
 
 - Tied to HDR like KWin: engages automatically when the monitor is in HDR mode

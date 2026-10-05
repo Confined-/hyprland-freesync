@@ -1,0 +1,11 @@
+# mkinitcpio preset file for the 'linux-freesync-hdr' package
+
+PRESETS=('default' 'fallback')
+
+ALL_config='/etc/mkinitcpio.conf'
+ALL_kver='/boot/vmlinuz-linux-freesync-hdr'
+
+default_image="/boot/initramfs-linux-freesync-hdr.img"
+
+fallback_image="/boot/initramfs-linux-freesync-hdr-fallback.img"
+fallback_options="-S autodetect"

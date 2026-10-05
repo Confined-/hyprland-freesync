@@ -1,0 +1,57 @@
+# Maintainer: Confined <https://github.com/Confined->
+pkgname=aquamarine-freesync
+pkgver=0.15.1
+pkgrel=1
+pkgdesc='Aquamarine with FreeSync HDR connector support (for hyprland-freesync)'
+url='https://github.com/Confined-/hyprland-freesync'
+arch=(x86_64)
+license=(BSD-3-Clause)
+depends=(
+  gcc-libs
+  hwdata
+  hyprutils
+  libdisplay-info
+  libdrm
+  libglvnd
+  libinput
+  mesa
+  pixman
+  seat
+  systemd-libs
+  wayland
+)
+makedepends=(
+  cmake
+  hyprwayland-scanner
+  ninja
+  pkgconf
+  wayland-protocols
+)
+provides=(aquamarine)
+conflicts=(aquamarine)
+# Pinned to the commit the patch was written against.
+_commit=52ea11f06dd492f34b3cc0b39a9c805beecafcff
+source=(
+  "git+https://github.com/hyprwm/aquamarine.git#commit=$_commit"
+  aquamarine-freesync-hdr.patch
+)
+sha256sums=('SKIP'
+            '8ff6d260915551e9099b1ca005b7d61f905fc1442bb25476408ddc8c268ad845')
+
+prepare() {
+  cd aquamarine
+  patch -Np1 < "$srcdir/aquamarine-freesync-hdr.patch"
+}
+
+build() {
+  cmake -B build -S aquamarine \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DBUILD_TESTING=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 aquamarine/LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+}

@@ -1,0 +1,89 @@
+# Maintainer: Confined <https://github.com/Confined->
+pkgname=hyprland-freesync
+# rolling-style version: <rev-count>.<short-hash> of the pinned commit below
+pkgver=r0.19fb395
+pkgrel=1
+pkgdesc='Hyprland with FreeSync HDR display mode support (requires patched kernel + aquamarine-freesync)'
+url='https://github.com/Confined-/hyprland-freesync'
+arch=(x86_64)
+license=(BSD-3-Clause)
+depends=(
+  aquamarine
+  cairo
+  gcc-libs
+  glib2
+  glslang
+  hyprcursor
+  hyprgraphics
+  hyprlang
+  hyprutils
+  lcms2
+  libcanberra
+  libdrm
+  libei
+  libglvnd
+  libinput
+  libxkbcommon
+  libxcb
+  libxcursor
+  lua55
+  mesa
+  muparser
+  pango
+  pciutils
+  re2
+  sdbus-cpp
+  systemd-libs
+  tomlplusplus
+  udis86
+  util-linux-libs
+  wayland
+  xcb-util-errors
+  xcb-util-renderutil
+  xcb-util-wm
+)
+makedepends=(
+  cmake
+  git
+  hyprland-protocols
+  hyprwayland-scanner
+  ninja
+  pkgconf
+  python
+  wayland-protocols
+)
+optdepends=('xorg-xwayland: XWayland support')
+provides=(hyprland)
+conflicts=(hyprland)
+# Pinned to the commit the patch was written against.
+_commit=19fb395d45314960e6f79f17994a84094f1cd4f6
+source=(
+  "git+https://github.com/hyprwm/Hyprland.git#commit=$_commit"
+  hyprland-freesync-hdr.patch
+)
+sha256sums=('SKIP'
+            'c3f9d6987da6b437d2839c286fc41893b8c49ff0c8c5e00cb4d0757a463a93fe')
+
+pkgver() {
+  cd Hyprland
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd Hyprland
+  patch -Np1 < "$srcdir/hyprland-freesync-hdr.patch"
+}
+
+build() {
+  cmake -B build -S Hyprland \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DBUILD_TESTING=OFF \
+    -DWITH_TESTS=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 Hyprland/LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+}

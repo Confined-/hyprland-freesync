@@ -1,0 +1,284 @@
+diff --git a/include/aquamarine/backend/DRM.hpp b/include/aquamarine/backend/DRM.hpp
+index 281f13f..340accb 100644
+--- a/include/aquamarine/backend/DRM.hpp
++++ b/include/aquamarine/backend/DRM.hpp
+@@ -328,6 +328,7 @@ namespace Aquamarine {
+             // causing per-frame blanking, see #265).
+             uint64_t maxBpc      = 0;
+             uint64_t colorspace  = 0;
++            uint64_t freeSyncHDR = 0;
+             uint16_t contentType = 0;
+             uint32_t crtcID      = 0;
+ 
+@@ -406,6 +407,7 @@ namespace Aquamarine {
+             // to skip re-emitting unchanged values on page-flips (see #265).
+             uint64_t          maxBpc      = 0;
+             uint64_t          colorspace  = 0;
++            uint64_t          freeSyncHDR = 0;
+             uint16_t          contentType = 0;
+             uint32_t          crtcID      = 0;
+             bool              propsCached = false;
+@@ -426,13 +428,14 @@ namespace Aquamarine {
+                 uint32_t max_bpc;             // not guaranteed to exist
+                 uint32_t Colorspace;          // not guaranteed to exist
+                 uint32_t hdr_output_metadata; // not guaranteed to exist
++                uint32_t freeSyncHdrMode;   // not guaranteed to exist
+                 uint32_t tile;                // not guaranteed to exist
+ 
+                 // atomic-modesetting only
+ 
+                 uint32_t crtc_id;
+             } values;
+-            uint32_t props[14] = {0};
++            uint32_t props[15] = {0};
+         };
+         UDRMConnectorProps props;
+ 
+@@ -445,6 +448,15 @@ namespace Aquamarine {
+             uint32_t props[3] = {0};
+         };
+         UDRMConnectorColorspace colorspace;
++
++        union UDRMConnectorFreeSyncHDR {
++            struct {
++                uint32_t Disabled;
++                uint32_t Native;
++            } values;
++            uint32_t props[2] = {0};
++        };
++        UDRMConnectorFreeSyncHDR freeSyncHDR;
+     };
+ 
+     class IDRMImplementation {
+diff --git a/include/aquamarine/output/Output.hpp b/include/aquamarine/output/Output.hpp
+index f38dbe6..af4eb44 100644
+--- a/include/aquamarine/output/Output.hpp
++++ b/include/aquamarine/output/Output.hpp
+@@ -67,6 +67,7 @@ namespace Aquamarine {
+             AQ_OUTPUT_STATE_WCG                = (1 << 13),
+             AQ_OUTPUT_STATE_CURSOR_SHAPE       = (1 << 14),
+             AQ_OUTPUT_STATE_CURSOR_POS         = (1 << 15),
++            AQ_OUTPUT_STATE_FREESYNC_HDR = (1 << 16),
+         };
+ 
+         struct SInternalState {
+@@ -86,6 +87,7 @@ namespace Aquamarine {
+             int32_t                                        explicitInFence = -1, explicitOutFence = -1;
+             Hyprutils::Math::Mat3x3                        ctm            = Hyprutils::Math::Mat3x3::identity();
+             bool                                           wideColorGamut = false;
++            bool                                           freeSyncHDR    = false;
+             hdr_output_metadata                            hdrMetadata    = {};
+             uint16_t                                       contentType    = DRM_MODE_CONTENT_TYPE_GRAPHICS;
+             eOutputColorRange                              colorRange     = AQ_OUTPUT_COLOR_RANGE_AUTO;
+@@ -100,11 +102,11 @@ namespace Aquamarine {
+             int                   error() const;
+ 
+           private:
+-            CSnapshot(const COutputState* owner, const SInternalState& state, const std::array<uint64_t, 16>& generations);
++            CSnapshot(const COutputState* owner, const SInternalState& state, const std::array<uint64_t, 32>& generations);
+ 
+             const COutputState*            m_owner = nullptr;
+             SInternalState                 m_state;
+-            std::array<uint64_t, 16>       m_generations = {};
++            std::array<uint64_t, 32>       m_generations = {};
+             Hyprutils::OS::CFileDescriptor m_explicitInFence;
+             int                            m_error = 0;
+ 
+@@ -134,13 +136,14 @@ namespace Aquamarine {
+         void                  resetExplicitFences();
+         void                  setCTM(const Hyprutils::Math::Mat3x3& ctm);
+         void                  setWideColorGamut(bool wcg);
++        void                  setFreeSyncHDR(bool enabled);
+         void                  setHDRMetadata(const hdr_output_metadata& metadata);
+         void                  setContentType(const uint16_t drmContentType);
+         void                  setColorRange(eOutputColorRange range);
+ 
+       private:
+         SInternalState           internalState;
+-        std::array<uint64_t, 16> propertyGenerations = {};
++        std::array<uint64_t, 32> propertyGenerations = {};
+         uint64_t                 nextGeneration      = 0;
+ 
+         void                     markCommitted(uint32_t properties);
+@@ -262,6 +265,7 @@ namespace Aquamarine {
+         bool                                                              nonDesktop = false;
+         eSubpixelMode                                                     subpixel   = AQ_SUBPIXEL_NONE;
+         bool                                                              vrrCapable = false, vrrActive = false;
++        bool                                                              freeSyncHDRCapable = false;
+         bool                                                              needsFrame       = false;
+         bool                                                              supportsExplicit = false;
+ 
+diff --git a/src/backend/drm/DRM.cpp b/src/backend/drm/DRM.cpp
+index 2f3dcc7..15854d7 100644
+--- a/src/backend/drm/DRM.cpp
++++ b/src/backend/drm/DRM.cpp
+@@ -1770,6 +1770,8 @@ bool Aquamarine::SDRMConnector::init(drmModeConnector* connector) {
+         return false;
+     if (props.values.Colorspace)
+         getDRMConnectorColorspace(backend->gpu->fd, props.values.Colorspace, &colorspace);
++    if (props.values.freeSyncHdrMode)
++        getDRMConnectorFreeSyncHDR(backend->gpu->fd, props.values.freeSyncHdrMode, &freeSyncHDR);
+ 
+     auto name = drmModeGetConnectorTypeName(connector->connector_type);
+     if (!name)
+@@ -1999,6 +2001,11 @@ void Aquamarine::SDRMConnector::recheckCRTCProps() {
+         AQ_LOG_DEBUG,
+         std::format("drm: connector {} crtc {} HDR ({})", szName, (props.values.hdr_output_metadata ? "supports" : "doesn't support"), props.values.hdr_output_metadata));
+ 
++    output->freeSyncHDRCapable = props.values.freeSyncHdrMode && freeSyncHDR.values.Native;
++
++    backend->backend->log(AQ_LOG_DEBUG,
++                          std::format("drm: connector {} {}", szName, (output->freeSyncHDRCapable ? "supports FreeSync HDR" : "doesn't support FreeSync HDR")));
++
+     backend->backend->log(AQ_LOG_DEBUG,
+                           std::format("drm: connector {} crtc {} Colorspace ({})", szName, (props.values.Colorspace ? "supports" : "doesn't support"), props.values.Colorspace));
+ }
+diff --git a/src/backend/drm/Props.cpp b/src/backend/drm/Props.cpp
+index 4c1e3cf..18feb1a 100644
+--- a/src/backend/drm/Props.cpp
++++ b/src/backend/drm/Props.cpp
+@@ -24,6 +24,7 @@ static const struct prop_info connector_info[] = {
+     {.name = "Colorspace", .index = INDEX(Colorspace)},
+     {.name = "DPMS", .index = INDEX(dpms)},
+     {.name = "EDID", .index = INDEX(edid)},
++    {.name = "FreeSync HDR Mode", .index = INDEX(freeSyncHdrMode)},
+     {.name = "HDR_OUTPUT_METADATA", .index = INDEX(hdr_output_metadata)},
+     {.name = "PATH", .index = INDEX(path)},
+     {.name = "TILE", .index = INDEX(tile)},
+@@ -45,6 +46,13 @@ static const struct prop_info colorspace_info[] = {
+ #undef INDEX
+ };
+ 
++static const struct prop_info freesyncHDR_info[] = {
++#define INDEX(name) (offsetof(SDRMConnector::UDRMConnectorFreeSyncHDR, values.name) / sizeof(uint32_t))
++    {.name = "Disabled", .index = INDEX(Disabled)},
++    {.name = "FreeSync 2 Native", .index = INDEX(Native)},
++#undef INDEX
++};
++
+ static const struct prop_info crtc_info[] = {
+ #define INDEX(name) (offsetof(SDRMCRTC::UDRMCRTCProps, values.name) / sizeof(uint32_t))
+     {.name = "ACTIVE", .index = INDEX(active)},           {.name = "CTM", .index = INDEX(ctm)},
+@@ -139,6 +147,10 @@ namespace Aquamarine {
+         return scanPropertyEnum(fd, id, out->props, colorspace_info, sizeof(colorspace_info) / sizeof(colorspace_info[0]));
+     }
+ 
++    bool getDRMConnectorFreeSyncHDR(int fd, uint32_t id, SDRMConnector::UDRMConnectorFreeSyncHDR* out) {
++        return scanPropertyEnum(fd, id, out->props, freesyncHDR_info, sizeof(freesyncHDR_info) / sizeof(freesyncHDR_info[0]));
++    }
++
+     bool getDRMCRTCProps(int fd, uint32_t id, SDRMCRTC::UDRMCRTCProps* out) {
+         return scanProperties(fd, id, DRM_MODE_OBJECT_CRTC, out->props, crtc_info, sizeof(crtc_info) / sizeof(crtc_info[0]));
+     }
+diff --git a/src/backend/drm/Props.hpp b/src/backend/drm/Props.hpp
+index 6b5a626..563fb6f 100644
+--- a/src/backend/drm/Props.hpp
++++ b/src/backend/drm/Props.hpp
+@@ -5,6 +5,7 @@
+ namespace Aquamarine {
+     bool  getDRMConnectorProps(int fd, uint32_t id, SDRMConnector::UDRMConnectorProps* out);
+     bool  getDRMConnectorColorspace(int fd, uint32_t id, SDRMConnector::UDRMConnectorColorspace* out);
++    bool  getDRMConnectorFreeSyncHDR(int fd, uint32_t id, SDRMConnector::UDRMConnectorFreeSyncHDR* out);
+     bool  getDRMCRTCProps(int fd, uint32_t id, SDRMCRTC::UDRMCRTCProps* out);
+     bool  getDRMPlaneProps(int fd, uint32_t id, SDRMPlane::UDRMPlaneProps* out);
+     bool  getDRMPlaneColorRange(int fd, uint32_t id, SDRMPlane::UDRMPlaneColorRange* out);
+diff --git a/src/backend/drm/impl/Atomic.cpp b/src/backend/drm/impl/Atomic.cpp
+index e47781b..53804c2 100644
+--- a/src/backend/drm/impl/Atomic.cpp
++++ b/src/backend/drm/impl/Atomic.cpp
+@@ -251,6 +251,7 @@ void Aquamarine::CDRMAtomicRequest::addConnector(Hyprutils::Memory::CSharedPoint
+     const bool     forceConnProps = data.modeset || !connector->atomic.propsCached;
+     const uint32_t newCrtcID      = enable ? connector->crtc->id : 0;
+     uint64_t       newMaxBpc = 0, newColorspace = 0;
++    uint64_t       newFreeSyncHDR = 0;
+     uint16_t       newContentType = 0;
+     bool           maxBpcEmitted  = false;
+ 
+@@ -280,6 +281,12 @@ void Aquamarine::CDRMAtomicRequest::addConnector(Hyprutils::Memory::CSharedPoint
+                 add(connector->id, connector->props.values.Colorspace, newColorspace);
+         }
+ 
++        if (connector->props.values.freeSyncHdrMode && connector->freeSyncHDR.values.Native) {
++            newFreeSyncHDR = STATE.freeSyncHDR ? connector->freeSyncHDR.values.Native : connector->freeSyncHDR.values.Disabled;
++            if (forceConnProps || connector->atomic.freeSyncHDR != newFreeSyncHDR)
++                add(connector->id, connector->props.values.freeSyncHdrMode, newFreeSyncHDR);
++        }
++
+         if (connector->props.values.hdr_output_metadata && data.atomic.hdrd)
+             add(connector->id, connector->props.values.hdr_output_metadata, data.atomic.hdrBlob);
+     } else
+@@ -299,6 +306,7 @@ void Aquamarine::CDRMAtomicRequest::addConnector(Hyprutils::Memory::CSharedPoint
+     data.atomic.maxBpc        = newMaxBpc;
+     data.atomic.maxBpcEmitted = maxBpcEmitted;
+     data.atomic.colorspace    = newColorspace;
++    data.atomic.freeSyncHDR   = newFreeSyncHDR;
+     data.atomic.contentType   = newContentType;
+     data.atomic.crtcID        = newCrtcID;
+ 
+@@ -491,6 +499,7 @@ void Aquamarine::CDRMAtomicImpl::finalizeAsync(CDRMAtomicRequest& request, SP<SD
+     request.apply(data);
+     connector->atomic.maxBpc      = data.atomic.maxBpc;
+     connector->atomic.colorspace  = data.atomic.colorspace;
++    connector->atomic.freeSyncHDR = data.atomic.freeSyncHDR;
+     connector->atomic.contentType = data.atomic.contentType;
+     connector->atomic.crtcID      = data.atomic.crtcID;
+     connector->atomic.propsCached = true;
+@@ -671,6 +680,7 @@ bool Aquamarine::CDRMAtomicImpl::commit(Hyprutils::Memory::CSharedPointer<SDRMCo
+             if (!data.test) {
+                 connector->atomic.maxBpc      = data.atomic.maxBpc;
+                 connector->atomic.colorspace  = data.atomic.colorspace;
++                connector->atomic.freeSyncHDR = data.atomic.freeSyncHDR;
+                 connector->atomic.contentType = data.atomic.contentType;
+                 connector->atomic.crtcID      = data.atomic.crtcID;
+                 connector->atomic.propsCached = true;
+@@ -720,6 +730,7 @@ bool Aquamarine::CDRMAtomicImpl::commit(Hyprutils::Memory::CSharedPointer<SDRMCo
+             // next page-flip can skip emitting unchanged ones (see #265).
+             connector->atomic.maxBpc      = data.atomic.maxBpc;
+             connector->atomic.colorspace  = data.atomic.colorspace;
++            connector->atomic.freeSyncHDR = data.atomic.freeSyncHDR;
+             connector->atomic.contentType = data.atomic.contentType;
+             connector->atomic.crtcID      = data.atomic.crtcID;
+             connector->atomic.propsCached = true;
+diff --git a/src/output/Output.cpp b/src/output/Output.cpp
+index bf2e73d..b83b7c2 100644
+--- a/src/output/Output.cpp
++++ b/src/output/Output.cpp
+@@ -70,7 +70,7 @@ bool Aquamarine::IOutput::destroy() {
+     return false;
+ }
+ 
+-Aquamarine::COutputState::CSnapshot::CSnapshot(const COutputState* owner, const SInternalState& state, const std::array<uint64_t, 16>& generations) :
++Aquamarine::COutputState::CSnapshot::CSnapshot(const COutputState* owner, const SInternalState& state, const std::array<uint64_t, 32>& generations) :
+     m_owner(owner), m_state(state), m_generations(generations) {
+     if (!(m_state.committed & AQ_OUTPUT_STATE_EXPLICIT_IN_FENCE) || m_state.explicitInFence < 0)
+         return;
+@@ -91,7 +91,7 @@ const Aquamarine::COutputState::SInternalState& Aquamarine::COutputState::CSnaps
+ }
+ 
+ bool Aquamarine::COutputState::CSnapshot::needsReconfig() const {
+-    return m_state.committed & (AQ_OUTPUT_STATE_ENABLED | AQ_OUTPUT_STATE_FORMAT | AQ_OUTPUT_STATE_MODE | AQ_OUTPUT_STATE_HDR | AQ_OUTPUT_STATE_WCG);
++    return m_state.committed & (AQ_OUTPUT_STATE_ENABLED | AQ_OUTPUT_STATE_FORMAT | AQ_OUTPUT_STATE_MODE | AQ_OUTPUT_STATE_HDR | AQ_OUTPUT_STATE_WCG | AQ_OUTPUT_STATE_FREESYNC_HDR);
+ }
+ 
+ int Aquamarine::COutputState::CSnapshot::error() const {
+@@ -152,7 +152,7 @@ void Aquamarine::COutputState::rearm(const CSnapshot& snapshot) {
+ }
+ 
+ bool Aquamarine::COutputState::needsReconfig() const {
+-    return internalState.committed & (AQ_OUTPUT_STATE_ENABLED | AQ_OUTPUT_STATE_FORMAT | AQ_OUTPUT_STATE_MODE | AQ_OUTPUT_STATE_HDR | AQ_OUTPUT_STATE_WCG);
++    return internalState.committed & (AQ_OUTPUT_STATE_ENABLED | AQ_OUTPUT_STATE_FORMAT | AQ_OUTPUT_STATE_MODE | AQ_OUTPUT_STATE_HDR | AQ_OUTPUT_STATE_WCG | AQ_OUTPUT_STATE_FREESYNC_HDR);
+ }
+ 
+ void Aquamarine::COutputState::addDamage(const Hyprutils::Math::CRegion& region) {
+@@ -237,6 +237,11 @@ void Aquamarine::COutputState::setWideColorGamut(bool wcg) {
+     markCommitted(AQ_OUTPUT_STATE_WCG);
+ }
+ 
++void Aquamarine::COutputState::setFreeSyncHDR(bool enabled) {
++    internalState.freeSyncHDR = enabled;
++    markCommitted(AQ_OUTPUT_STATE_FREESYNC_HDR);
++}
++
+ void Aquamarine::COutputState::setHDRMetadata(const hdr_output_metadata& metadata) {
+     internalState.hdrMetadata = metadata;
+     markCommitted(AQ_OUTPUT_STATE_HDR);

@@ -1,0 +1,148 @@
+# Maintainer: Confined <https://github.com/Confined->
+pkgbase=linux-freesync-hdr
+pkgver=7.3.rc6
+pkgrel=1
+pkgdesc='Linux with FreeSync HDR mode support (amdgpu, rebased onto 7.3-rc6)'
+url='https://github.com/Confined-/hyprland-freesync'
+arch=(x86_64)
+license=(GPL-2.0-only)
+makedepends=(
+  bc cpio gettext libelf pahole perl python tar xz zstd
+)
+options=('!strip')
+_srcname=linux-7.3-rc6
+source=(
+  "https://git.kernel.org/torvalds/t/linux-7.3-rc6.tar.gz"
+  # (mirror if kernel.org is slow: https://github.com/torvalds/linux/archive/v7.3-rc6.tar.gz)
+  0001-amdgpu_dm-send-FreeSync-packets-on-DP.patch
+  0002-amdgpu_dm-VSDB-in-CEA-extensions.patch
+  0003-drm-amdgpu-FreeSync-HDR-Mode-property.patch
+  linux-freesync-hdr.preset
+)
+# Run `updpkgsums` after reviewing, or keep SKIP for the upstream tarball.
+sha256sums=('SKIP'
+            'f8f18ce566138c7db466864f87310326cfdae0f25d04c86eadf4be5d7fb95577'
+            '020b7659f01b713f6023cd23ae81a0129b9201c1649911ef7b782a6dfeca7ff6'
+            'e0a332adc94f5ca8899d7789e9d7864540f97a8fe8892f5115cd8942dfa668e8'
+            'SKIP')
+
+export KBUILD_BUILD_HOST=archlinux
+export KBUILD_BUILD_USER=$pkgbase
+export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
+
+prepare() {
+  cd $_srcname
+
+  echo "Applying FreeSync HDR patches..."
+  for p in "$srcdir"/000*.patch; do
+    patch -Np1 < "$p"
+  done
+
+  # Reuse the running kernel's config when available, else fall back to defconfig.
+  if [[ -r /proc/config.gz ]]; then
+    echo "Using /proc/config.gz as base config"
+    zcat /proc/config.gz > .config
+  else
+    echo "No /proc/config.gz, falling back to defconfig"
+    make defconfig
+  fi
+
+  # Hard requirements of this patch set.
+  ./scripts/config -e DRM -e DRM_AMDGPU
+
+  make olddefconfig
+
+  make -s kernelrelease > version
+  echo "Prepared $pkgbase $(<version)"
+}
+
+build() {
+  cd $_srcname
+  make -j$(nproc) all
+}
+
+_package() {
+  pkgdesc="The $pkgdesc kernel and modules"
+  depends=(coreutils kmod initramfs)
+  optdepends=(
+    'linux-firmware: firmware images needed for some devices'
+    'wireless-regdb: to set the correct wireless channels of your country'
+  )
+  backup=("etc/mkinitcpio.d/$pkgbase.preset")
+
+  cd $_srcname
+  local kernver="$(<version)"
+  local modulesdir="$pkgdir/usr/lib/modules/$kernver"
+
+  echo "Installing modules..."
+  make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 modules_install
+
+  # Remove the build symlink (headers package owns a real build dir).
+  rm -f "$modulesdir"/build
+
+  echo "Installing boot image..."
+  install -Dm644 "$(make -s image_name)" "$pkgdir/boot/vmlinuz-$pkgbase"
+
+  echo "Installing mkinitcpio preset..."
+  install -Dm644 "$srcdir/$pkgbase.preset" "$pkgdir/etc/mkinitcpio.d/$pkgbase.preset"
+}
+
+_package-headers() {
+  pkgdesc="Headers and scripts for building modules for the $pkgdesc kernel"
+  depends=(pahole)
+
+  cd $_srcname
+  local kernver="$(<version)"
+  local builddir="$pkgdir/usr/lib/modules/$kernver/build"
+
+  echo "Installing headers..."
+
+  install -Dt "$builddir" -m644 Makefile Module.symvers System.map version vmlinux .config
+  install -Dt "$builddir/kernel" -m644 kernel/Makefile
+  install -Dt "$builddir/arch/x86" -m644 arch/x86/Makefile
+  cp -t "$builddir" -a scripts
+
+  # required when DEBUG_INFO_BTF is enabled
+  if [[ -x tools/bpf/resolve_btfids/resolve_btfids ]]; then
+    install -Dt "$builddir/tools/bpf/resolve_btfids" tools/bpf/resolve_btfids/resolve_btfids
+  fi
+
+  install -Dt "$builddir/drivers/md" -m644 drivers/md/*.h
+  install -Dt "$builddir/net/mac80211" -m644 net/mac80211/*.h
+  install -Dt "$builddir/drivers/media/i2c" -m644 drivers/media/i2c/*.h
+  install -Dt "$builddir/drivers/media/usb/dvb-usb" -m644 drivers/media/usb/dvb-usb/*.h
+  install -Dt "$builddir/drivers/media/dvb-frontends" -m644 drivers/media/dvb-frontends/*.h
+  install -Dt "$builddir/drivers/media/tuners" -m644 drivers/media/tuners/*.h
+  install -Dt "$builddir/fs/xfs" -m644 fs/xfs/*.h
+  install -Dt "$builddir/mm" -m644 mm/*.h
+  install -Dt "$builddir/fs/overlayfs" -m644 fs/overlayfs/*.h
+  install -Dt "$builddir/security/selinux" -m644 security/selinux/*.h
+  install -Dt "$builddir/security/smack" -m644 security/smack/*.h
+  install -Dt "$builddir/security/apparmor" -m644 security/apparmor/*.h
+  install -Dt "$builddir/io_uring" -m644 io_uring/*.h
+
+  echo "Installing headers for asm, drm and misc subsystems..."
+  cp -t "$builddir" -a include
+  cp -t "$builddir/arch/x86" -a arch/x86/include
+  install -Dt "$builddir/arch/x86/kernel" -m644 arch/x86/kernel/asm-offsets.s
+
+  install -Dt "$builddir/drivers/firmware/efi" -m644 drivers/firmware/efi/*.h
+  install -Dt "$builddir/drivers/firmware/efi/efi" -m644 drivers/firmware/efi/efi/*.h 2>/dev/null || true
+
+  echo "Adding makefiles and kconfigs..."
+  find . -name 'Makefile*' -o -name 'Kconfig*' | while read -r f; do
+    mkdir -p "$builddir/$(dirname "$f")"
+    cp "$f" "$builddir/$f"
+  done
+
+  echo "Removing unneeded files..."
+  find "$builddir" -name '*.o' -delete
+}
+
+pkgname=("$pkgbase" "$pkgbase-headers")
+for _p in "${pkgname[@]}"; do
+  eval "package_$_p() {
+    $(declare -f "_package${_p#$pkgbase}")
+    _package${_p#$pkgbase}
+  }"
+done

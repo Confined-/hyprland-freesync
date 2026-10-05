@@ -1,0 +1,166 @@
+diff --git a/src/config/values/ConfigValues.cpp b/src/config/values/ConfigValues.cpp
+index 016d02d..cd86f20 100644
+--- a/src/config/values/ConfigValues.cpp
++++ b/src/config/values/ConfigValues.cpp
+@@ -662,6 +662,7 @@ std::vector<SP<IValue>> Values::getConfigValues() {
+         MS<Bool>("render:async_commit", "Submit eligible output commits asynchronously.", false),
+         MS<Int>("render:non_shader_cm", "Enable CM without shader.", 3, {.min = 0, .max = 3, .map = OptionMap{{"disable", 0}, {"always", 1}, {"ondemand", 2}, {"ignore", 3}}}),
+         MS<String>("render:cm_sdr_eotf", "Default transfer function for displaying SDR apps.", "default"),
++        MS<Bool>("render:freesync_hdr", "Use the display's FreeSync HDR mode (native gamut + gamma 2.2) instead of PQ/BT2020 when HDR is active and supported (requires kernel support)", true),
+         MS<Bool>("render:commit_timing_enabled", "Enable commit timing proto. Requires restart", true),
+         MS<Bool>("render:icc_vcgt_enabled", "Enable sending VCGT ramps to KMS with ICC profiles", true),
+         MS<Bool>("render:use_shader_blur_blend", "Use experimental blurred bg blending", false),
+diff --git a/src/output/Monitor.cpp b/src/output/Monitor.cpp
+index 1852ef9..5e33a76 100644
+--- a/src/output/Monitor.cpp
++++ b/src/output/Monitor.cpp
+@@ -572,6 +572,24 @@ void CMonitor::applyCMType(NCMType::eCMType cmType, NTransferFunction::eTF cmSdr
+                                                           .maxFALL             = maxFALL});
+             break;
+         case NCMType::CM_HDR:
++            if (shouldUseFreeSyncHDR()) {
++                // FreeSync HDR: native primaries with gamma 2.2, EDID luminances.
++                // The display does the HDR handling, so we don't use BT2020 + PQ.
++                m_imageDescription = CImageDescription::from({.transferFunction    = NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22,
++                                                              .primariesNameSet    = false,
++                                                              .primariesNamed      = NColorManagement::CM_PRIMARIES_BT2020,
++                                                              .primaries           = m_output->parsedEDID.chromaticityCoords.has_value() ?
++                                                                                         masteringPrimaries :
++                                                                                         NColorManagement::getPrimaries(NColorManagement::CM_PRIMARIES_BT2020),
++                                                              .masteringPrimaries  = masteringPrimaries,
++                                                              .luminances          = {.min       = minLuminance(),
++                                                                                      .max       = maxLuminance(),
++                                                                                      .reference = maxLuminance()},
++                                                              .masteringLuminances = masteringLuminances,
++                                                              .maxCLL              = maxCLL,
++                                                              .maxFALL             = maxFALL});
++                break;
++            }
+             m_imageDescription = CImageDescription::from({.transferFunction    = NColorManagement::CM_TRANSFER_FUNCTION_ST2084_PQ,
+                                                           .primariesNameSet    = true,
+                                                           .primariesNamed      = NColorManagement::CM_PRIMARIES_BT2020,
+@@ -585,6 +603,22 @@ void CMonitor::applyCMType(NCMType::eCMType cmType, NTransferFunction::eTF cmSdr
+                                                           .maxFALL             = maxFALL});
+             break;
+         case NCMType::CM_HDR_EDID:
++            if (shouldUseFreeSyncHDR()) {
++                // FreeSync HDR: native primaries with gamma 2.2, EDID luminances (see CM_HDR).
++                m_imageDescription = CImageDescription::from(
++                    {.transferFunction = NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22,
++                     .primariesNameSet = false,
++                     .primariesNamed   = NColorManagement::CM_PRIMARIES_BT2020,
++                     .primaries = m_output->parsedEDID.chromaticityCoords.has_value() ? masteringPrimaries : NColorManagement::getPrimaries(NColorManagement::CM_PRIMARIES_BT2020),
++                     .masteringPrimaries  = masteringPrimaries,
++                     .luminances          = {.min       = minLuminance(),
++                                             .max       = maxLuminance(),
++                                             .reference = maxLuminance()},
++                     .masteringLuminances = masteringLuminances,
++                     .maxCLL              = maxCLL,
++                     .maxFALL             = maxFALL});
++                break;
++            }
+             m_imageDescription = CImageDescription::from(
+                 {.transferFunction = NColorManagement::CM_TRANSFER_FUNCTION_ST2084_PQ,
+                  .primariesNameSet = false,
+@@ -2356,6 +2390,11 @@ bool CMonitor::supportsHDR() {
+     }
+ }
+ 
++bool CMonitor::shouldUseFreeSyncHDR() {
++    static auto PENABLED = CConfigValue<Hyprlang::INT>("render:freesync_hdr");
++    return *PENABLED && supportsHDR() && m_output->freeSyncHDRCapable;
++}
++
+ float CMonitor::minLuminance(float defaultValue) {
+     return m_minLuminance >= 0 ? m_minLuminance : (m_output->parsedEDID.hdrMetadata.has_value() ? m_output->parsedEDID.hdrMetadata->desiredContentMinLuminance : defaultValue);
+ }
+@@ -2378,7 +2417,7 @@ float CMonitor::maxCLL() {
+ }
+ 
+ bool CMonitor::wantsWideColor() {
+-    return supportsWideColor() && (wantsHDR() || m_imageDescription->value().primariesNamed == CM_PRIMARIES_BT2020);
++    return supportsWideColor() && !(wantsHDR() && shouldUseFreeSyncHDR()) && (wantsHDR() || m_imageDescription->value().primariesNamed == CM_PRIMARIES_BT2020);
+ }
+ 
+ bool CMonitor::wantsHDR() {
+@@ -2386,7 +2425,7 @@ bool CMonitor::wantsHDR() {
+ }
+ 
+ bool CMonitor::inHDR() {
+-    return m_output->state->state().hdrMetadata.hdmi_metadata_type1.eotf == 2;
++    return m_output->state->state().hdrMetadata.hdmi_metadata_type1.eotf == 2 || m_output->state->state().freeSyncHDR;
+ }
+ 
+ std::optional<NColorManagement::PImageDescription> CMonitor::getFSImageDescription() {
+@@ -2699,10 +2738,14 @@ PImageDescription CMonitor::workBufferImageDescription() {
+     const bool  isHDRLikeTF =
+         value.transferFunction == CM_TRANSFER_FUNCTION_ST2084_PQ || value.transferFunction == CM_TRANSFER_FUNCTION_HLG || value.transferFunction == CM_TRANSFER_FUNCTION_EXT_LINEAR;
+ 
++    // FreeSync HDR outputs gamma22, but still needs the HDR (linear FP16)
++    // workbuffer to preserve highlight detail.
++    const bool  isFreeSyncHDR = shouldUseFreeSyncHDR() && wantsHDR();
++
+     const auto& cached = m_cachedInternalDescription->value();
+ 
+     // HDR
+-    if (isHDRLikeTF || *PFP16TF != 0) {
++    if (isHDRLikeTF || isFreeSyncHDR || *PFP16TF != 0) {
+         if (cached.transferFunction != LINEAR_IMAGE_DESCRIPTION->value().transferFunction || cached.luminances != value.luminances)
+             m_cachedInternalDescription = LINEAR_IMAGE_DESCRIPTION->with(value.luminances);
+         return m_cachedInternalDescription;
+diff --git a/src/output/Monitor.hpp b/src/output/Monitor.hpp
+index c2a6135..8d7de33 100644
+--- a/src/output/Monitor.hpp
++++ b/src/output/Monitor.hpp
+@@ -336,6 +336,7 @@ namespace Monitor {
+ 
+         bool                                                        wantsWideColor();
+         bool                                                        wantsHDR();
++        bool                                                        shouldUseFreeSyncHDR();
+ 
+         bool                                                        inHDR();
+         bool                                                        gammaRampsInUse();
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index 3d8b04e..d4affe3 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -2544,7 +2544,7 @@ void IHyprRenderer::handleFullscreenSettings(PHLMONITOR pMonitor) {
+         // HDR PQ surface & DS is active - surface settings
+ 
+         bool hdrIsHandled = false;
+-        if (FULLSCREEN_WINDOW) {
++        if (FULLSCREEN_WINDOW && !pMonitor->shouldUseFreeSyncHDR()) {
+             const auto ROOT_SURF = FULLSCREEN_WINDOW->wlSurface()->resource();
+             const auto SURF      = ROOT_SURF->findWithCM();
+ 
+@@ -2577,6 +2577,18 @@ void IHyprRenderer::handleFullscreenSettings(PHLMONITOR pMonitor) {
+         if (!*PAUTOHDR && !pMonitor->m_lastScanout)
+             wantHDR = configuredHDR;
+ 
++        const bool wantFS = wantHDR && pMonitor->shouldUseFreeSyncHDR();
++
++        if ((pMonitor->m_cmType == NCMType::CM_HDR || pMonitor->m_cmType == NCMType::CM_HDR_EDID) && wantHDR) {
++            // keep the image description in sync with the signal: gamma22 + native for
++            // FreeSync HDR, PQ + BT2020 otherwise. also converges live config toggles.
++            const bool descIsFS = pMonitor->m_imageDescription->value().transferFunction == NColorManagement::CM_TRANSFER_FUNCTION_GAMMA22;
++            if (descIsFS != wantFS) {
++                pMonitor->applyCMType(pMonitor->m_cmType, pMonitor->m_sdrEotf);
++                pMonitor->m_previousFSWindow.reset(); // trigger CTM update
++            }
++        }
++
+         if (!hdrIsHandled) {
+             const bool HDR_CHANGED = pMonitor->inHDR() != wantHDR;
+ 
+@@ -2591,6 +2603,11 @@ void IHyprRenderer::handleFullscreenSettings(PHLMONITOR pMonitor) {
+             const auto WANTED  = wantHDR ? createHDRMetadata(pMonitor->m_imageDescription->value(), pMonitor) : NO_HDR_METADATA;
+             const auto CURRENT = pMonitor->m_output->state->state().hdrMetadata;
+ 
++            // with a FreeSync HDR image description (gamma22 + native), the metadata
++            // built above already carries eotf 0 and native primaries, matching the mode.
++            if (pMonitor->m_output->state->state().freeSyncHDR != wantFS)
++                pMonitor->m_output->state->setFreeSyncHDR(wantFS);
++
+             // Required in order to clear stale HDR metadata
+             const bool INITIAL_SDR          = !pMonitor->m_needsHDRupdate && !wantHDR;
+             const bool HDR_METADATA_CHANGED = wantHDR && !hdrMetadataEqual(WANTED, CURRENT);
