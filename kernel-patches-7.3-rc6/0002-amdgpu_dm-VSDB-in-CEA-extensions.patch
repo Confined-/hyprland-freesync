@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH 2/3] amdgpu_dm: also look for the AMD VSDB in CEA extensions
+
+This makes FreeSync 2 work on some DisplayPort monitors whose VSDB
+is missing from the DisplayID extensions or only advertises v1/v2.
+
+Rebased onto v7.3-rc6: the core now parses VSDB v3 from the CEA block
+into display_info.amd_vsdb (consumed via get_amd_vsdb()), so this keeps
+that as the primary source and falls back to the local CEA parser for
+older versions. The DisplayID-first half of the original patch is dropped
+because the old parse_amd_vsdb() helper no longer exists upstream.
+---
+
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_connector.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_connector.c
+index d386bb147..279fb8c63 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_connector.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_connector.c
+@@ -3910,10 +3914,21 @@ void amdgpu_dm_update_freesync_caps(struct drm_connector *connector,
+ 
+ 		get_amd_vsdb(amdgpu_dm_connector, &vsdb_info);
+ 
+-		if (vsdb_info.replay_mode) {
++		if (!vsdb_info.amd_vsdb_version) {
++			/* The core only parses VSDB v3 from the CEA block; fall
++			 * back to the local parser for older versions.
++			 */
++			if (parse_hdmi_amd_vsdb(amdgpu_dm_connector, edid, &vsdb_info) < 0)
++				memset(&vsdb_info, 0, sizeof(vsdb_info));
++		}
++
++		if (vsdb_info.amd_vsdb_version) {
+ 			amdgpu_dm_connector->vsdb_info.replay_mode = vsdb_info.replay_mode;
+ 			amdgpu_dm_connector->vsdb_info.amd_vsdb_version = vsdb_info.amd_vsdb_version;
+-			amdgpu_dm_connector->as_type = ADAPTIVE_SYNC_TYPE_EDP;
++			if (sink->sink_signal == SIGNAL_TYPE_EDP)
++				amdgpu_dm_connector->as_type = ADAPTIVE_SYNC_TYPE_EDP;
++			else
++				amdgpu_dm_connector->as_type = ADAPTIVE_SYNC_TYPE_DP;
+ 		}
+ 
+ 	} else if (drm_edid && sink->sink_signal == SIGNAL_TYPE_HDMI_TYPE_A) {
