@@ -1,7 +1,7 @@
 # Maintainer: Confined <https://github.com/Confined->
 pkgbase=linux-freesync-hdr
 pkgver=7.3.rc6
-pkgrel=1
+pkgrel=2
 pkgdesc='Linux with FreeSync HDR mode support (amdgpu, rebased onto 7.3-rc6)'
 url='https://github.com/Confined-/hyprland-freesync'
 arch=(x86_64)
@@ -97,6 +97,25 @@ _package-headers() {
 
   echo "Installing headers..."
 
+  # Install a set of headers, silently skipping patterns that match nothing
+  # (source layouts vary between kernel versions).
+  _install_headers() {
+    local dest=$1; shift
+    local pat f files=()
+    shopt -s nullglob
+    for pat in "$@"; do
+      # shellcheck disable=SC2086
+      for f in $pat; do
+        files+=("$f")
+      done
+    done
+    shopt -u nullglob
+    if (( ${#files[@]} )); then
+      mkdir -p "$dest"
+      install -Dt "$dest" -m644 "${files[@]}"
+    fi
+  }
+
   install -Dt "$builddir" -m644 Makefile Module.symvers System.map version vmlinux .config
   install -Dt "$builddir/kernel" -m644 kernel/Makefile
   install -Dt "$builddir/arch/x86" -m644 arch/x86/Makefile
@@ -107,27 +126,27 @@ _package-headers() {
     install -Dt "$builddir/tools/bpf/resolve_btfids" tools/bpf/resolve_btfids/resolve_btfids
   fi
 
-  install -Dt "$builddir/drivers/md" -m644 drivers/md/*.h
-  install -Dt "$builddir/net/mac80211" -m644 net/mac80211/*.h
-  install -Dt "$builddir/drivers/media/i2c" -m644 drivers/media/i2c/*.h
-  install -Dt "$builddir/drivers/media/usb/dvb-usb" -m644 drivers/media/usb/dvb-usb/*.h
-  install -Dt "$builddir/drivers/media/dvb-frontends" -m644 drivers/media/dvb-frontends/*.h
-  install -Dt "$builddir/drivers/media/tuners" -m644 drivers/media/tuners/*.h
-  install -Dt "$builddir/fs/xfs" -m644 fs/xfs/*.h
-  install -Dt "$builddir/mm" -m644 mm/*.h
-  install -Dt "$builddir/fs/overlayfs" -m644 fs/overlayfs/*.h
-  install -Dt "$builddir/security/selinux" -m644 security/selinux/*.h
-  install -Dt "$builddir/security/smack" -m644 security/smack/*.h
-  install -Dt "$builddir/security/apparmor" -m644 security/apparmor/*.h
-  install -Dt "$builddir/io_uring" -m644 io_uring/*.h
+  _install_headers "$builddir/drivers/md" "drivers/md/*.h"
+  _install_headers "$builddir/net/mac80211" "net/mac80211/*.h"
+  _install_headers "$builddir/drivers/media/i2c" "drivers/media/i2c/*.h"
+  _install_headers "$builddir/drivers/media/usb/dvb-usb" "drivers/media/usb/dvb-usb/*.h"
+  _install_headers "$builddir/drivers/media/dvb-frontends" "drivers/media/dvb-frontends/*.h"
+  _install_headers "$builddir/drivers/media/tuners" "drivers/media/tuners/*.h"
+  _install_headers "$builddir/fs/xfs" "fs/xfs/*.h"
+  _install_headers "$builddir/mm" "mm/*.h"
+  _install_headers "$builddir/fs/overlayfs" "fs/overlayfs/*.h"
+  _install_headers "$builddir/security/selinux" "security/selinux/*.h"
+  _install_headers "$builddir/security/smack" "security/smack/*.h"
+  _install_headers "$builddir/security/apparmor" "security/apparmor/*.h"
+  _install_headers "$builddir/io_uring" "io_uring/*.h"
 
   echo "Installing headers for asm, drm and misc subsystems..."
   cp -t "$builddir" -a include
   cp -t "$builddir/arch/x86" -a arch/x86/include
   install -Dt "$builddir/arch/x86/kernel" -m644 arch/x86/kernel/asm-offsets.s
 
-  install -Dt "$builddir/drivers/firmware/efi" -m644 drivers/firmware/efi/*.h
-  install -Dt "$builddir/drivers/firmware/efi/efi" -m644 drivers/firmware/efi/efi/*.h 2>/dev/null || true
+  _install_headers "$builddir/drivers/firmware/efi" "drivers/firmware/efi/*.h"
+  _install_headers "$builddir/drivers/firmware/efi/efi" "drivers/firmware/efi/efi/*.h"
 
   echo "Adding makefiles and kconfigs..."
   find . -name 'Makefile*' -o -name 'Kconfig*' | while read -r f; do
